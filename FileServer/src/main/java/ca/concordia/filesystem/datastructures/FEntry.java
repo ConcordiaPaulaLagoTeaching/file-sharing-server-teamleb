@@ -1,47 +1,50 @@
 package ca.concordia.filesystem.datastructures;
 
-import java.util.LinkedList;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class FEntry {
-
+    // name <= 11 chars; empty string => free entry
     private String filename;
-    private short filesize;
-    private short firstBlock; // Pointers to data blocks
+    private short size;         // bytes
+    private short firstBlock;   // head fnode index, -1 if empty
 
-    public FEntry(String filename, short filesize, short firstblock) throws IllegalArgumentException{
-        //Check filename is max 11 bytes long
-        if (filename.length() > 11) {
-            throw new IllegalArgumentException("Filename cannot be longer than 11 characters.");
-        }
-        this.filename = filename;
-        this.filesize = filesize;
-        this.firstBlock = firstblock;
+    // per-file synchronization: many readers, single writer
+    private final ReentrantReadWriteLock rw = new ReentrantReadWriteLock(true);
+
+    public FEntry() {
+        this.filename = "";
+        this.size = 0;
+        this.firstBlock = -1;
     }
 
-    // Getters and Setters
-    public String getFilename() {
-        return filename;
+    public FEntry(String filename, int size, int firstBlock) {
+        setFilename(filename);
+        setSize((short) size);
+        setFirstBlock((short) firstBlock);
     }
 
+    public String getFilename() { return filename; }
     public void setFilename(String filename) {
-        if (filename.length() > 11) {
+        if (filename == null) filename = "";
+        if (filename.length() > 11)
             throw new IllegalArgumentException("Filename cannot be longer than 11 characters.");
-        }
         this.filename = filename;
     }
 
-    public short getFilesize() {
-        return filesize;
+    public short getSize() { return size; }
+    public void setSize(short size) {
+        if (size < 0) throw new IllegalArgumentException("Filesize cannot be negative.");
+        this.size = size;
     }
 
-    public void setFilesize(short filesize) {
-        if (filesize < 0) {
-            throw new IllegalArgumentException("Filesize cannot be negative.");
-        }
-        this.filesize = filesize;
-    }
+    public short getFirstBlock() { return firstBlock; }
+    public void setFirstBlock(short firstBlock) { this.firstBlock = firstBlock; }
 
-    public short getFirstBlock() {
-        return firstBlock;
-    }
+    public boolean inUse() { return filename != null && !filename.isEmpty(); }
+
+    // ---- read/write lock API ----
+    public void acquireRead()  { rw.readLock().lock();  }
+    public void releaseRead()  { rw.readLock().unlock(); }
+    public void acquireWrite() { rw.writeLock().lock(); }
+    public void releaseWrite() { rw.writeLock().unlock(); }
 }
