@@ -1,38 +1,122 @@
 package ca.concordia.filesystem;
 
 import ca.concordia.filesystem.datastructures.FEntry;
+import ca.concordia.filesystem.datastructures.FNode;
 
+import java.io.File;
+import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.util.concurrent.locks.ReentrantLock;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class FileSystemManager {
 
-    private final int MAXFILES = 5;
-    private final int MAXBLOCKS = 10;
-    private final static FileSystemManager instance;
+    private final int MAXFILES;
+    private final int MAXBLOCKS;
+    private final int BLOCK_SIZE;
+
+    private static final int FENTRY_BYTES = 16; 
+    private static final int FNODE_BYTES  = 8;  
+
     private final RandomAccessFile disk;
-    private final ReentrantLock globalLock = new ReentrantLock();
+    private final Object ioLock = new Object();          
+    private final int totalBlocks;
+    private final int metaBytes;
+    private final int metaBlocks;
+    private final int dataStartBlock;
 
-    private static final int BLOCK_SIZE = 128; // Example block size
+    private final FEntry[] entries;
+    private final FNode[]  fnodes;
 
-    private FEntry[] inodeTable; // Array of inodes
-    private boolean[] freeBlockList; // Bitmap for free blocks
 
-    public FileSystemManager(String filename, int totalSize) {
-        // Initialize the file system manager with a file
-        if(instance == null) {
-            //TODO Initialize the file system
-        } else {
-            throw new IllegalStateException("FileSystemManager is already initialized.");
+    private final ReentrantReadWriteLock fsLock = new ReentrantReadWriteLock(true);
+    private final ConcurrentHashMap<String, ReentrantReadWriteLock> fileLocks = new ConcurrentHashMap<>();
+
+    public FileSystemManager(String backingFilename,
+                             int blockSize,
+                             int maxFiles,
+                             int maxBlocks,
+                             int totalSizeBytes) {
+        try {
+            if (blockSize <= 0 || maxFiles <= 0 || maxBlocks <= 0)
+                throw new IllegalArgumentException("All size parameters must be positive.");
+            if (totalSizeBytes % blockSize != 0)
+                throw new IllegalArgumentException("Total size must be a multiple of BLOCK_SIZE");
+
+            this.BLOCK_SIZE = blockSize;
+            this.MAXFILES   = maxFiles;
+            this.MAXBLOCKS  = maxBlocks;
+
+            this.totalBlocks = totalSizeBytes / blockSize;
+
+            this.entries = new FEntry[MAXFILES];
+            this.fnodes  = new FNode[MAXBLOCKS];
+            for (int i = 0; i < MAXFILES; i++) entries[i] = new FEntry();
+            for (int i = 0; i < MAXBLOCKS; i++) fnodes[i] = new FNode();
+
+            this.metaBytes      = MAXFILES * FENTRY_BYTES + MAXBLOCKS * FNODE_BYTES;
+            this.metaBlocks     = (metaBytes + blockSize - 1) / blockSize;
+            this.dataStartBlock = metaBlocks;
+
+            if (dataStartBlock + MAXBLOCKS > totalBlocks)
+                throw new IllegalStateException("Not enough space for data blocks (increase totalSizeBytes).");
+
+            File f = new File(backingFilename);
+            boolean existed = f.exists();
+
+            this.disk = new RandomAccessFile(f, "rw");
+            synchronized (ioLock) {
+                this.disk.setLength((long) totalBlocks * blockSize);
+            }
+
+            if (!existed) {
+                freshFormat();
+            } else {
+                try { loadMetadata(); }
+                catch (Exception corrupt) { freshFormat(); }
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
-
     }
 
-    public void createFile(String fileName) throws Exception {
-        // TODO
-        throw new UnsupportedOperationException("Method not implemented yet.");
+    public void createFile(String name) throws Exception {
+        fsLock.writeLock().lock();
+        try {
+            ensureValidName(name);
+            if (findEntryIndex(name) >= 0) throw new Exception("ERROR: file already exists");
+            int slot = findFreeEntryIndex();
+            if (slot < 0) throw new Exception("ERROR: no free file entries");
+
+            entries[slot] = new FEntry(name, 0, -1);
+            fileLocks.putIfAbsent(name, new ReentrantReadWriteLock(true));
+            flushMetadata();
+        } finally {
+            fsLock.writeLock().unlock();
+        }
     }
 
+    public void deleteFile(String name) throws Exception {
+        fsLock.writeLock().lock();
+        try {
+            int idx = findEntryIndex(name);
+            if (idx < 0) throw new Exception("ERROR: file " + name + " does not exist");
 
-    // TODO: Add readFile, writeFile and other required methods,
+            ReentrantReadWriteLock lk = fileLocks.computeIfAbsent(name, k -> new ReentrantReadWriteLock(true));
+            lk.writeLock().lock();
+            try {
+                freeChain(entries[idx].getFirstBlock());
+                entries[idx] = new FEntry(); 
+                flushMetadata();
+            } finally {
+                lk.writeLock().unlock();
+            }
+        } finally {
+            fsLock.writeLock().unlock();
+        }
+    }
+
 }
