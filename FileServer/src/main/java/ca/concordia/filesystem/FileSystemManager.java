@@ -118,5 +118,59 @@ public class FileSystemManager {
             fsLock.writeLock().unlock();
         }
     }
+  // check that file name is not empty or too long
+    private void ensureValidName(String n) throws Exception {
+        if (n == null || n.isEmpty() || n.length() > 11) {
+            throw new Exception("ERROR: invalid filename");
+        }
+    }
+
+    // find file entry by name
+    private int findEntryIndex(String name) {
+        for (int i = 0; i < entries.length; i++) {
+            if (entries[i].inUse() && entries[i].getFilename().equals(name)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // find the first free entry slot
+    private int findFreeEntryIndex() {
+        for (int i = 0; i < entries.length; i++) {
+            if (!entries[i].inUse()) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // get a list of free fnode indexes
+    private List<Integer> collectFreeFNodes(int need) {
+        ArrayList<Integer> list = new ArrayList<>();
+        for (int i = 0; i < fnodes.length && list.size() < need; i++) {
+            if (fnodes[i].isFree()) {
+                list.add(i);
+            }
+        }
+        return list;
+    }
+    // TEMPORARY: stubs for unimplemented functions so code can compile
+private void freshFormat() {
+    System.out.println("freshFormat() not implemented yet");
+}
+
+private void loadMetadata() {
+    System.out.println("loadMetadata() not implemented yet");
+}
+
+private void flushMetadata() {
+    System.out.println("flushMetadata() not implemented yet");
+}
+
+private void freeChain(short blockIndex) {
+    System.out.println("freeChain() not implemented yet");
+}// end of TEMPORARY stubs
+
 
 }
