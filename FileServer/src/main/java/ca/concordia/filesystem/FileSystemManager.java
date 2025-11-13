@@ -9,7 +9,6 @@ import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class FileSystemManager {
@@ -22,7 +21,7 @@ public class FileSystemManager {
     private static final int FNODE_BYTES  = 8;  
 
     private final RandomAccessFile disk;
-    private final Object ioLock = new Object();          
+    private final Object ioLock = new Object(); 
     private final int totalBlocks;
     private final int metaBytes;
     private final int metaBlocks;
@@ -33,7 +32,6 @@ public class FileSystemManager {
 
 
     private final ReentrantReadWriteLock fsLock = new ReentrantReadWriteLock(true);
-    private final ConcurrentHashMap<String, ReentrantReadWriteLock> fileLocks = new ConcurrentHashMap<>();
 
     public FileSystemManager(String backingFilename,
                              int blockSize,
@@ -92,7 +90,6 @@ public class FileSystemManager {
             if (slot < 0) throw new Exception("ERROR: no free file entries");
 
             entries[slot] = new FEntry(name, 0, -1);
-            fileLocks.putIfAbsent(name, new ReentrantReadWriteLock(true));
             flushMetadata();
         } finally {
             fsLock.writeLock().unlock();
@@ -104,81 +101,103 @@ public class FileSystemManager {
         try {
             int idx = findEntryIndex(name);
             if (idx < 0) throw new Exception("ERROR: file " + name + " does not exist");
-
-            ReentrantReadWriteLock lk = fileLocks.computeIfAbsent(name, k -> new ReentrantReadWriteLock(true));
-            lk.writeLock().lock();
-            try {
-                freeChain(entries[idx].getFirstBlock());
-                entries[idx] = new FEntry(); 
-                flushMetadata();
-            } finally {
-                lk.writeLock().unlock();
-            }
+            short head = entries[idx].getFirstBlock();
+            freeChain(head);              
+            entries[idx] = new FEntry();   
+            flushMetadata();
         } finally {
             fsLock.writeLock().unlock();
         }
     }
-    public byte[] readFile(String name) throws Exception {    // Reads a file's data from the virtual filesystem
-        fsLock.readLock().lock(); // lock the whole filesystem for reading
+
+    public void writeFile(String name, byte[] contents) throws Exception {
+        if (contents.length > 0xFFFF) throw new Exception("ERROR: file too large"); 
+
+        fsLock.writeLock().lock(); 
         try {
             int eidx = findEntryIndex(name);
             if (eidx < 0) throw new Exception("ERROR: file " + name + " does not exist");
 
-            ReentrantReadWriteLock lk = fileLocks.computeIfAbsent(name, k -> new ReentrantReadWriteLock(true));  // each file also has its own lock
-            lk.readLock().lock();
-            try {
-                int size = Short.toUnsignedInt(entries[eidx].getSize());
-                byte[] out = new byte[size];
-                int fn = entries[eidx].getFirstBlock();
-                int pos = 0;
-                while (fn >= 0 && pos < size) {
-                    int len = Math.min(BLOCK_SIZE, size - pos);
-                    readDataBlock(fn, out, pos, len);
-                    pos += len;
-                    fn = fnodes[fn].getNext();
-                }
-                return out;
-            } finally {
-                lk.readLock().unlock();
+            int need = (contents.length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            List<Integer> free = collectFreeFNodes(need);
+            if (free.size() < need) throw new Exception("ERROR: file too large");
+
+            
+            int head = -1, prev = -1;
+            for (int i = 0; i < need; i++) {
+                int fn = free.get(i);
+                fnodes[fn].setBlockIndex(fn);  
+                fnodes[fn].setNext(-1);
+                if (prev >= 0) fnodes[prev].setNext(fn); else head = fn;
+
+                int off = i * BLOCK_SIZE;
+                int len = Math.min(BLOCK_SIZE, contents.length - off);
+                writeFullBlock(fn, contents, off, len);
+                prev = fn;
             }
+
+            short oldHead = entries[eidx].getFirstBlock();
+            entries[eidx].setFirstBlock((short) head);
+            entries[eidx].setSize((short) contents.length);
+            flushMetadata();
+
+            freeChain(oldHead);
+            flushMetadata(); 
+        } finally {
+            fsLock.writeLock().unlock();
+        }
+    }
+
+    public byte[] readFile(String name) throws Exception {
+        fsLock.readLock().lock();
+        try {
+            int eidx = findEntryIndex(name);
+            if (eidx < 0) throw new Exception("ERROR: file " + name + " does not exist");
+
+            int size = Short.toUnsignedInt(entries[eidx].getSize());
+            byte[] out = new byte[size];
+            int fn = entries[eidx].getFirstBlock();
+            int pos = 0;
+            while (fn >= 0 && pos < size) {
+                int len = Math.min(BLOCK_SIZE, size - pos);
+                readDataBlock(fn, out, pos, len);
+                pos += len;
+                fn = fnodes[fn].getNext();
+            }
+            return out;
         } finally {
             fsLock.readLock().unlock();
         }
     }
-       // returns a list of all filenames currently in the filesystem
+
     public String[] listFiles() {
         fsLock.readLock().lock();
         try {
             ArrayList<String> names = new ArrayList<>();
-            for (FEntry e : entries) 
-                if (e.inUse()) names.add(e.getFilename());
+            for (FEntry e : entries) if (e.inUse()) names.add(e.getFilename());
             return names.toArray(new String[0]);
         } finally {
             fsLock.readLock().unlock();
         }
     }
 
-    // checks if the given name is valid (not too long or empty)
     private void ensureValidName(String n) throws Exception {
         if (n == null || n.isEmpty() || n.length() > 11)
             throw new Exception("ERROR: filename too large");
     }
 
-    // searches for a file entry with the given name
     private int findEntryIndex(String name) {
         for (int i = 0; i < entries.length; i++)
             if (entries[i].inUse() && entries[i].getFilename().equals(name)) return i;
         return -1;
     }
 
-    // finds the first empty slot for a new file entry
     private int findFreeEntryIndex() {
         for (int i = 0; i < entries.length; i++)
             if (!entries[i].inUse()) return i;
         return -1;
     }
 
-    // collects a list of free fnodes (unused blocks)
     private List<Integer> collectFreeFNodes(int need) {
         ArrayList<Integer> list = new ArrayList<>();
         for (int i = 0; i < fnodes.length && list.size() < need; i++)
@@ -186,7 +205,7 @@ public class FileSystemManager {
         return list;
     }
 
-    // frees all blocks linked to a file
+   
     private void freeChain(short head) throws IOException {
         int p = head;
         while (p >= 0) {
@@ -196,14 +215,11 @@ public class FileSystemManager {
             fnodes[p].setNext(-1);
             p = nxt;
         }
-        flushMetadata();
     }
 
-    // helper functions to map fnodes to data blocks
     private int fnodeToDataBlock(int fnodeIdx) { return dataStartBlock + fnodeIdx; }
     private long blockOffset(int blockIndex)   { return (long) blockIndex * BLOCK_SIZE; }
 
-    // writes one full block of data to disk
     private void writeFullBlock(int fnodeIndex, byte[] src, int off, int len) throws IOException {
         int dataBlock = fnodeToDataBlock(fnodeIndex);
         long pos = blockOffset(dataBlock);
@@ -219,7 +235,6 @@ public class FileSystemManager {
         }
     }
 
-    // reads a block of data from disk
     private void readDataBlock(int fnodeIndex, byte[] dst, int off, int len) throws IOException {
         int dataBlock = fnodeToDataBlock(fnodeIndex);
         long pos = blockOffset(dataBlock);
@@ -229,7 +244,6 @@ public class FileSystemManager {
         }
     }
 
-    // fills a block with zeros 
     private void zeroBlock(int fnodeIndex) throws IOException {
         int dataBlock = fnodeToDataBlock(fnodeIndex);
         long pos = blockOffset(dataBlock);
@@ -239,7 +253,6 @@ public class FileSystemManager {
         }
     }
 
-    // clears the whole filesystem and resets metadata
     private void freshFormat() throws IOException {
         synchronized (ioLock) {
             disk.seek(0);
@@ -251,7 +264,6 @@ public class FileSystemManager {
         flushMetadata();
     }
 
-    // reads  file entries and fnodes from disk
     private void loadMetadata() throws IOException {
         synchronized (ioLock) {
             disk.seek(0);
@@ -261,8 +273,7 @@ public class FileSystemManager {
                 String name = new String(nameBytes, StandardCharsets.US_ASCII);
                 int nul = name.indexOf(0);
                 if (nul >= 0) name = name.substring(0, nul);
-                name = name.trim();
-
+           
                 short size = disk.readShort();
                 short first = disk.readShort();
 
@@ -270,9 +281,6 @@ public class FileSystemManager {
                 entries[i].setFilename(name);
                 entries[i].setSize(size);
                 entries[i].setFirstBlock(first);
-
-                if (entries[i].inUse())
-                    fileLocks.putIfAbsent(entries[i].getFilename(), new ReentrantReadWriteLock(true));
             }
             for (int i = 0; i < MAXBLOCKS; i++) {
                 int blockIndex = disk.readInt();
@@ -283,7 +291,6 @@ public class FileSystemManager {
         }
     }
 
-    // saves metadata back to disk
     private void flushMetadata() throws IOException {
         synchronized (ioLock) {
             disk.seek(0);
@@ -302,10 +309,9 @@ public class FileSystemManager {
         }
     }
 
-    // writes the filename into a fixed size buffer (used when saving entries)
     private void writeFixedName(String name) throws IOException {
         if (name == null) name = "";
-        byte[] buf = new byte[12]; 
+        byte[] buf = new byte[12]; // 11 chars + NUL
         byte[] n = name.getBytes(StandardCharsets.US_ASCII);
         int len = Math.min(11, n.length);
         System.arraycopy(n, 0, buf, 0, len);
@@ -315,4 +321,3 @@ public class FileSystemManager {
         }
     }
 }
-
