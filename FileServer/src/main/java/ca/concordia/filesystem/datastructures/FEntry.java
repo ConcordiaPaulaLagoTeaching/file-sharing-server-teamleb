@@ -1,23 +1,25 @@
 package ca.concordia.filesystem.datastructures;
 
 public class FEntry {
-    private String filename;   // max 11 chars; empty = unused
+    private String filename;   // max 11 chars  empty = unused
     private short size;        // file size in bytes (unsigned short)
     private short firstBlock;  // index into fnodes, -1 if none
 
-    public FEntry() {
+    public FEntry() {  // Default constructor, initializes an unused entry
         this.filename = "";
         this.size = 0;
         this.firstBlock = -1;
     }
 
-    public FEntry(String filename, int size, int firstBlock) {
+    public FEntry(String filename, int size, int firstBlock) {   // Constructs a file entry with given parameters
         setFilename(filename);
         setSize((short) size);
         setFirstBlock((short) firstBlock);
     }
 
-    public String getFilename() { return filename; }
+    public String getFilename() { return filename; } 
+
+    // Sets the filename (max 11 characters)
     public void setFilename(String filename) {
         if (filename == null) filename = "";
         if (filename.length() > 11)
@@ -26,7 +28,7 @@ public class FEntry {
     }
 
     public short getSize() { return size; }
-    public void setSize(short size) {
+    public void setSize(short size) { // Sets the file size in bytes
         if (size < 0) throw new IllegalArgumentException("Size cannot be negative.");
         this.size = size;
     }
@@ -34,7 +36,7 @@ public class FEntry {
     public short getFirstBlock() { return firstBlock; }
     public void setFirstBlock(short firstBlock) { this.firstBlock = firstBlock; }
 
-    public boolean inUse() {
-        return filename != null && !filename.isEmpty();
+    public boolean inUse() { // Returns true if this entry is in use
+        return filename != null && !filename.isEmpty(); 
     }
 }
