@@ -13,26 +13,33 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class FileSystemManager {
 
+    // Maximum number of files, blocks and block size (bytes)
     private final int MAXFILES;
     private final int MAXBLOCKS;
     private final int BLOCK_SIZE;
 
+    // Size of on-disk metadata records (fixed layout)
     private static final int FENTRY_BYTES = 16; 
     private static final int FNODE_BYTES  = 8;  
 
+    // Underlying disk file and synchronization for RandomAccessFile
     private final RandomAccessFile disk;
     private final Object ioLock = new Object(); 
+
+    // Layout information for the disk file
     private final int totalBlocks;
     private final int metaBytes;
     private final int metaBlocks;
     private final int dataStartBlock;
 
+    // In-memory copies of metadata (directory and fnode table)
     private final FEntry[] entries;
     private final FNode[]  fnodes;
 
-
+    // Global readers–writer lock for the whole filesystem
     private final ReentrantReadWriteLock fsLock = new ReentrantReadWriteLock(true);
 
+    /* Build a filesystem manager on top of a single backing file. If the file does not exist, a fresh filesystem is created. If it exists, metadata is loaded from disk.*/
     public FileSystemManager(String backingFilename,
                              int blockSize,
                              int maxFiles,
@@ -50,11 +57,13 @@ public class FileSystemManager {
 
             this.totalBlocks = totalSizeBytes / blockSize;
 
+            // Initialize metadata arrays in memory
             this.entries = new FEntry[MAXFILES];
             this.fnodes  = new FNode[MAXBLOCKS];
             for (int i = 0; i < MAXFILES; i++) entries[i] = new FEntry();
             for (int i = 0; i < MAXBLOCKS; i++) fnodes[i] = new FNode();
 
+            // Compute where metadata and data blocks live on disk
             this.metaBytes      = MAXFILES * FENTRY_BYTES + MAXBLOCKS * FNODE_BYTES;
             this.metaBlocks     = (metaBytes + blockSize - 1) / blockSize;
             this.dataStartBlock = metaBlocks;
@@ -70,6 +79,7 @@ public class FileSystemManager {
                 this.disk.setLength((long) totalBlocks * blockSize);
             }
 
+            // Either create a new filesystem or load an existing one
             if (!existed) {
                 freshFormat();
             } else {
@@ -81,6 +91,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Create a new empty file with the given name.*/
     public void createFile(String name) throws Exception {
         fsLock.writeLock().lock();
         try {
@@ -96,6 +107,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Delete a file and free all of its blocks. */
     public void deleteFile(String name) throws Exception {
         fsLock.writeLock().lock();
         try {
@@ -110,6 +122,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Overwrite a file with new contents. This operation is designed to be atomic from the point of view of other threads.*/
     public void writeFile(String name, byte[] contents) throws Exception {
         if (contents.length > 0xFFFF) throw new Exception("ERROR: file too large"); 
 
@@ -122,7 +135,7 @@ public class FileSystemManager {
             List<Integer> free = collectFreeFNodes(need);
             if (free.size() < need) throw new Exception("ERROR: file too large");
 
-            
+            // Build new chain of fnode blocks
             int head = -1, prev = -1;
             for (int i = 0; i < need; i++) {
                 int fn = free.get(i);
@@ -136,6 +149,7 @@ public class FileSystemManager {
                 prev = fn;
             }
 
+            // Swap in the new chain and then free the old one
             short oldHead = entries[eidx].getFirstBlock();
             entries[eidx].setFirstBlock((short) head);
             entries[eidx].setSize((short) contents.length);
@@ -148,6 +162,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Read the whole file into a byte array.*/
     public byte[] readFile(String name) throws Exception {
         fsLock.readLock().lock();
         try {
@@ -170,6 +185,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Return all current filenames in the filesystem.*/
     public String[] listFiles() {
         fsLock.readLock().lock();
         try {
@@ -181,23 +197,27 @@ public class FileSystemManager {
         }
     }
 
+    // Check basic validity of a filename
     private void ensureValidName(String n) throws Exception {
         if (n == null || n.isEmpty() || n.length() > 11)
             throw new Exception("ERROR: filename too large");
     }
 
+    // Find the index of an existing file, or -1 if not found
     private int findEntryIndex(String name) {
         for (int i = 0; i < entries.length; i++)
             if (entries[i].inUse() && entries[i].getFilename().equals(name)) return i;
         return -1;
     }
 
+    // Find a free FEntry slot
     private int findFreeEntryIndex() {
         for (int i = 0; i < entries.length; i++)
             if (!entries[i].inUse()) return i;
         return -1;
     }
 
+    // Collect indices of free fnodes until we have "need" of them
     private List<Integer> collectFreeFNodes(int need) {
         ArrayList<Integer> list = new ArrayList<>();
         for (int i = 0; i < fnodes.length && list.size() < need; i++)
@@ -205,7 +225,7 @@ public class FileSystemManager {
         return list;
     }
 
-   
+    /* Free a linked list of fnode blocks, zeroing their data.*/
     private void freeChain(short head) throws IOException {
         int p = head;
         while (p >= 0) {
@@ -217,9 +237,11 @@ public class FileSystemManager {
         }
     }
 
+    // Helpers to translate fnode index to on-disk block and byte position
     private int fnodeToDataBlock(int fnodeIdx) { return dataStartBlock + fnodeIdx; }
     private long blockOffset(int blockIndex)   { return (long) blockIndex * BLOCK_SIZE; }
 
+    /* Write up to one full block of file data into the block that belongs to the given fnode index.*/
     private void writeFullBlock(int fnodeIndex, byte[] src, int off, int len) throws IOException {
         int dataBlock = fnodeToDataBlock(fnodeIndex);
         long pos = blockOffset(dataBlock);
@@ -235,6 +257,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Read part of one block from disk into the destination buffer. */
     private void readDataBlock(int fnodeIndex, byte[] dst, int off, int len) throws IOException {
         int dataBlock = fnodeToDataBlock(fnodeIndex);
         long pos = blockOffset(dataBlock);
@@ -244,6 +267,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Overwrite a whole block with zeros (used when freeing blocks)*/
     private void zeroBlock(int fnodeIndex) throws IOException {
         int dataBlock = fnodeToDataBlock(fnodeIndex);
         long pos = blockOffset(dataBlock);
@@ -253,6 +277,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Initialize a brand new filesystem: zero the whole file and set all entries/fnodes to their default (free) state.*/
     private void freshFormat() throws IOException {
         synchronized (ioLock) {
             disk.seek(0);
@@ -264,6 +289,7 @@ public class FileSystemManager {
         flushMetadata();
     }
 
+    /* Load filesystem metadata from disk into memory.*/
     private void loadMetadata() throws IOException {
         synchronized (ioLock) {
             disk.seek(0);
@@ -291,6 +317,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Write the in-memory metadata (entries and fnodes) back to disk.*/
     private void flushMetadata() throws IOException {
         synchronized (ioLock) {
             disk.seek(0);
@@ -309,6 +336,7 @@ public class FileSystemManager {
         }
     }
 
+    /* Write a fixed-size 12-byte filename (11 chars + NUL) to disk.*/
     private void writeFixedName(String name) throws IOException {
         if (name == null) name = "";
         byte[] buf = new byte[12]; // 11 chars + NUL
