@@ -28,10 +28,10 @@ public class FEntry {
     }
 
     public short getSize() { return size; }
-    public void setSize(short size) { // Sets the file size in bytes
-        if (size < 0) throw new IllegalArgumentException("Size cannot be negative.");
-        this.size = size;
+    public void setSize(short size) {
+    this.size = size;   // store raw 16-bit unsigned value
     }
+
 
     public short getFirstBlock() { return firstBlock; }
     public void setFirstBlock(short firstBlock) { this.firstBlock = firstBlock; }
